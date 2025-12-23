@@ -1,0 +1,357 @@
+// @ts-nocheck
+import React, { useState, useLayoutEffect } from "react";
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  ScrollView,
+  ActivityIndicator,
+  StyleSheet,
+  Linking,
+  Modal,
+} from "react-native";
+import { graphqlRequest, BACKEND_BASE_URL } from "../services/api";
+import { useLogout } from "../hooks/Logout";
+import { useNavigation } from "@react-navigation/native";
+import { openWhatsApp } from "../utils/whatsapp";
+
+export default function Invoice() {
+  const [requestId, setRequestId] = useState("");
+  const [repairData, setRepairData] = useState<any>(null);
+  const [totalAmount, setTotalAmount] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
+
+  const navigation = useNavigation();
+  const logout = useLogout();
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      title: "Invoice",
+      headerRight: () => (
+        <TouchableOpacity onPress={logout} style={{ marginRight: 15 }}>
+          <Text style={{ color: "red", fontWeight: "bold" }}>Logout</Text>
+        </TouchableOpacity>
+      ),
+    });
+  }, [navigation, logout]);
+
+  const getInvoiceUrl = () => {
+    if (!pdfUrl) return "";
+    return pdfUrl.startsWith("/")
+      ? BACKEND_BASE_URL + pdfUrl
+      : pdfUrl;
+  };
+
+  const fetchDetails = async () => {
+    if (!requestId) {
+      alert("Please enter Request ID");
+      return;
+    }
+
+    setLoading(true);
+    setMessage("");
+    setRepairData(null);
+
+    const query = `
+      query ($requestId: String!) {
+        repairRequest(requestId: $requestId) {
+          requestId
+          itemName
+          problemDescription
+          contactInfo
+          estimation {
+            total
+            items {
+              description
+              quantity
+              unitPrice
+              amount
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const res = await graphqlRequest(query, { requestId });
+      setRepairData(res?.repairRequest || null);
+      setTotalAmount(String(res?.repairRequest?.estimation?.total || ""));
+    } catch (err: any) {
+      setMessage(err.message || "Failed to load request");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /* ================= GENERATE INVOICE ================= */
+
+  const generateInvoice = async () => {
+    if (!requestId || !totalAmount) {
+      alert("Missing request data");
+      return;
+    }
+
+    setLoading(true);
+
+    const mutation = `
+      mutation ($requestId: String!, $totalAmount: Decimal!) {
+        generateInvoice(requestId: $requestId, totalAmount: $totalAmount) {
+          invoice {
+            invoiceNumber
+            pdfUrl
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await graphqlRequest(mutation, {
+        requestId,
+        totalAmount: Number(totalAmount),
+      });
+
+      const url = response?.generateInvoice?.invoice?.pdfUrl;
+
+      if (!url) {
+        throw new Error("PDF URL not returned from server");
+      }
+
+      setPdfUrl(url);
+      setMessage("Invoice generated successfully!");
+      setShowWhatsAppModal(true);
+    } catch (err: any) {
+      setMessage(err.message || "Invoice generation failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+
+  const openPdf = async () => {
+    const finalUrl = getInvoiceUrl();
+
+    if (!finalUrl) {
+      alert("PDF URL missing!");
+      return;
+    }
+
+    const canOpen = await Linking.canOpenURL(finalUrl);
+    if (!canOpen) {
+      alert("No app found to open PDF");
+      return;
+    }
+
+    Linking.openURL(finalUrl);
+  };
+
+  return (
+    <>
+      {/* WHATSAPP CONFIRM MODAL */}
+      <Modal transparent visible={showWhatsAppModal} animationType="fade">
+        <View style={styles.modalBackground}>
+          <View style={styles.modalBox}>
+            <Text style={styles.modalTitle}>Invoice Generated</Text>
+
+            <Text style={{ marginBottom: 15 }}>
+              Do you want to send the invoice to the customer via WhatsApp?
+            </Text>
+
+            <TouchableOpacity
+              style={styles.submitBtn}
+              onPress={() => {
+                setShowWhatsAppModal(false);
+
+                openWhatsApp(
+                  repairData?.contactInfo,
+                  `🧾 Invoice Generated
+
+Request ID: ${repairData?.requestId}
+Item: ${repairData?.itemName}
+Total Amount: ₹${repairData?.estimation?.total}
+
+📄 Download Invoice:
+${getInvoiceUrl()}
+
+Thank you for choosing our service.`
+                );
+              }}
+            >
+              <Text style={styles.submitText}>Send WhatsApp</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => setShowWhatsAppModal(false)}
+              style={styles.cancelButton}
+            >
+              <Text style={styles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* MAIN SCREEN */}
+      <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.title}>Generate Invoice</Text>
+
+        <TextInput
+          placeholder="Enter Request ID"
+          style={styles.input}
+          value={requestId}
+          onChangeText={setRequestId}
+        />
+
+        <TouchableOpacity onPress={fetchDetails} style={styles.button}>
+          <Text style={styles.buttonText}>Load Details</Text>
+        </TouchableOpacity>
+
+        {loading && <ActivityIndicator size="large" />}
+
+        {repairData && (
+          <>
+            <Text style={styles.header}>INVOICE PREVIEW</Text>
+
+            <Text>Customer: {repairData.contactInfo}</Text>
+            <Text>Item: {repairData.itemName}</Text>
+            <Text>Problem: {repairData.problemDescription}</Text>
+            <Text>Request ID: {repairData.requestId}</Text>
+
+            <View style={styles.line} />
+
+            <Text style={styles.subHeader}>Estimation Items</Text>
+
+            {repairData.estimation.items.map((item: any, i: number) => (
+              <View key={i} style={styles.row}>
+                <Text>{item.description}</Text>
+                <Text>
+                  {item.quantity} × {item.unitPrice}
+                </Text>
+                <Text>₹{item.amount}</Text>
+              </View>
+            ))}
+
+            <View style={styles.line} />
+
+            <Text style={styles.total}>
+              Total: ₹{repairData.estimation.total}
+            </Text>
+
+            <TouchableOpacity
+              onPress={generateInvoice}
+              style={styles.button}
+            >
+              <Text style={styles.buttonText}>Generate Invoice</Text>
+            </TouchableOpacity>
+
+            {pdfUrl !== "" && (
+              <TouchableOpacity
+                style={styles.pdfButton}
+                onPress={openPdf}
+              >
+                <Text style={styles.pdfButtonText}>View Invoice PDF</Text>
+              </TouchableOpacity>
+            )}
+          </>
+        )}
+
+        {!!message && <Text style={styles.message}>{message}</Text>}
+      </ScrollView>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { padding: 20 },
+  title: { fontSize: 22, fontWeight: "700", textAlign: "center" },
+
+  input: {
+    borderWidth: 1,
+    borderColor: "#ccc",
+    padding: 12,
+    borderRadius: 8,
+    marginVertical: 10,
+  },
+
+  button: {
+    backgroundColor: "#3ff7baff",
+    padding: 14,
+    borderRadius: 8,
+    alignItems: "center",
+    marginVertical: 10,
+  },
+  buttonText: { color: "#000", fontSize: 16, fontWeight: "700" },
+
+  header: { fontSize: 20, fontWeight: "bold", marginVertical: 10 },
+  subHeader: { marginTop: 20, fontSize: 18, fontWeight: "bold" },
+
+  row: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 5,
+  },
+
+  total: { marginTop: 10, fontSize: 18, fontWeight: "bold" },
+
+  message: {
+    marginTop: 20,
+    textAlign: "center",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+
+  pdfButton: {
+    backgroundColor: "#4CAF50",
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 15,
+    alignItems: "center",
+  },
+  pdfButtonText: { color: "#fff", fontSize: 16, fontWeight: "bold" },
+
+  line: {
+    height: 1,
+    backgroundColor: "#ddd",
+    marginVertical: 12,
+  },
+
+  modalBackground: {
+    flex: 1,
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.5)",
+  },
+  modalBox: {
+    backgroundColor: "#fff",
+    padding: 20,
+    borderRadius: 12,
+    marginHorizontal: 20,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    marginBottom: 10,
+  },
+  submitBtn: {
+    backgroundColor: "#25D366",
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  submitText: {
+    textAlign: "center",
+    color: "#000",
+    fontWeight: "bold",
+  },
+  cancelButton: {
+    backgroundColor: "#999",
+    padding: 10,
+    borderRadius: 8,
+  },
+  cancelText: {
+    textAlign: "center",
+    color: "#fff",
+    fontWeight: "bold",
+  },
+});
